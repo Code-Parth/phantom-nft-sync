@@ -1,5 +1,6 @@
 "use client";
 
+import BigNumber from "bignumber.js";
 import toast from "react-hot-toast";
 import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/input";
@@ -7,26 +8,28 @@ import { Button } from "@/components/ui/button";
 import { PeerMetadata } from "@/types/huddle01Type";
 import { useEffect, useRef, useState } from "react";
 import dripHuddleData from "@/lib/drip/dripHuddleData";
-import { useWallet } from "@solana/wallet-adapter-react";
 import { ItemsResponse } from "@/types/SearchAssetsType";
 import PersonVideo from "@/components/huddle01/media/Video";
 import ChangeDevice from "@/components/huddle01/changeDevice";
+import { WalletAdapterNetwork } from "@solana/wallet-adapter-base";
 import { useStudioState } from "@/lib/huddle01/studio/studioState";
 import { Video, VideoOff, Mic, MicOff, Volume2 } from "lucide-react";
 import { useLocalAudio, useLocalVideo } from "@huddle01/react/hooks";
+import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import SpinnerLoadingAnimation from "@/components/ui/spinnerLoadingAnimation";
 import { useDevices, useLocalMedia, useLocalPeer, useRoom } from "@huddle01/react/hooks";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { clusterApiUrl, Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 
 interface dripHuddleDataInterface {
     collectionAddress: string;
     huddleRoom: string;
 }
 
-
 export default function HuddleLobbyPage({ params }: { params: { Huddle01Room: string } }) {
     const router = useRouter();
-    const { publicKey } = useWallet();
+    const { connection } = useConnection();
+    const { publicKey, sendTransaction } = useWallet();
 
     const { fetchStream } = useLocalMedia();
     const { name, setName } = useStudioState();
@@ -43,6 +46,8 @@ export default function HuddleLobbyPage({ params }: { params: { Huddle01Room: st
     const [checkCollectionVerification, setCheckCollectionVerification] = useState<boolean>(false);
     const [huddleDripCollectionRoomId, setHuddleDripCollectionRoomId] = useState<dripHuddleDataInterface>();
 
+    const [creatorCollectionAddress, setCreatorCollectionAddress] = useState<string>("");
+
     const [isJoining, setIsJoining] = useState(false);
     const { joinRoom } = useRoom({
         onJoin: () => {
@@ -50,6 +55,51 @@ export default function HuddleLobbyPage({ params }: { params: { Huddle01Room: st
             router.push(`./`);
         },
     });
+
+    const makeTransaction = async ({ fromWallet, toWallet, amount, reference }: { fromWallet: PublicKey, toWallet: PublicKey, amount: number, reference: PublicKey }) => {
+        const network = WalletAdapterNetwork.Devnet;
+        const endpoint = clusterApiUrl(network);
+        const connection = new Connection(endpoint, "confirmed");
+        const { blockhash } = await connection.getLatestBlockhash("finalized");
+
+        const transaction = new Transaction({
+            recentBlockhash: blockhash,
+            feePayer: fromWallet,
+        });
+
+        const transferInstruction = SystemProgram.transfer({
+            fromPubkey: fromWallet,
+            lamports: amount * LAMPORTS_PER_SOL,
+            toPubkey: toWallet,
+        });
+
+        transferInstruction.keys.push({
+            pubkey: reference,
+            isSigner: false,
+            isWritable: true,
+        });
+
+        transaction.add(transferInstruction);
+
+        return transaction;
+    };
+
+    const doTransaction = async ({ amount, receiver }: { amount: number, receiver: PublicKey }) => {
+        const fromWallet = publicKey?.toBase58();
+        const toWallet = receiver;
+        const bnAmount = new BigNumber(amount);
+        const reference = Keypair.generate().publicKey;
+        const transaction = await makeTransaction({
+            fromWallet: new PublicKey(fromWallet!),
+            toWallet,
+            amount: bnAmount.toNumber(),
+            reference
+        });
+        const signature = await sendTransaction(transaction, connection);
+        console.log("Signature:", signature);
+
+        return signature;
+    };
 
     useEffect(() => {
         const findRoom = dripHuddleData.find((room) => room.huddleRoom == params.Huddle01Room);
@@ -81,6 +131,10 @@ export default function HuddleLobbyPage({ params }: { params: { Huddle01Room: st
                 }),
             });
             const data = await response.json();
+            if (data.result.total > 0) {
+                setCreatorCollectionAddress(data.result.items[0].creators[0].address);
+            }
+
             return { items: data.result };
         } catch (error) {
             console.error("Error fetching tokens:", error);
@@ -88,12 +142,17 @@ export default function HuddleLobbyPage({ params }: { params: { Huddle01Room: st
         }
     };
 
+    console.log("Creator Collection Address:", creatorCollectionAddress);
+
     useEffect(() => {
         const fetchData = async () => {
             try {
                 const { items } = await verifyNFTCollection(publicKey?.toBase58()!, huddleDripCollectionRoomId?.collectionAddress!) as ItemsResponse;
                 if (items.total > 0) {
                     setCheckCollectionVerification(true);
+                }
+                else {
+                    setCheckCollectionVerification(false);
                 }
             } catch (error) {
                 console.error("Error fetching tokens:", error);
@@ -219,18 +278,36 @@ export default function HuddleLobbyPage({ params }: { params: { Huddle01Room: st
                                             return;
                                         }
                                         else {
-                                            const verify = toast.loading("Verifying NFT Collection...");
-                                            setIsJoining(true);
-                                            const response = await fetch(
-                                                `/api/token?roomId=${params.Huddle01Room}&displayName=${name}`
-                                            );
-                                            const token = await response.text();
-                                            await joinRoom({
-                                                roomId: params.Huddle01Room,
-                                                token,
-                                            });
-                                            toast.dismiss(verify);
-                                            toast.success("NFT Collection Verified!");
+                                            const isTransactionStatus = toast.loading("Sending Transaction...");
+                                            try {
+                                                // const txnHash = await doTransaction({ amount: 0.000080, receiver: new PublicKey("ETVZ97k3rZv96cwp3CYpPoBC74PKkQsNQ4ex6NHx2hRx") });
+                                                const txnHash = await doTransaction({ amount: 0.000081, receiver: new PublicKey(creatorCollectionAddress) });
+                                                if (txnHash) {
+                                                    toast.dismiss(isTransactionStatus);
+                                                    toast.success("Transaction sent successfully!");
+                                                    const verify = toast.loading("Verifying NFT Collection...");
+                                                    setIsJoining(true);
+                                                    const response = await fetch(
+                                                        `/api/token?roomId=${params.Huddle01Room}&displayName=${name}`
+                                                    );
+                                                    const token = await response.text();
+                                                    await joinRoom({
+                                                        roomId: params.Huddle01Room,
+                                                        token,
+                                                    });
+                                                    toast.dismiss(verify);
+                                                    toast.success("NFT Collection Verified!");
+                                                }
+                                                else {
+                                                    toast.dismiss(isTransactionStatus);
+                                                    toast.error("Transaction failed!");
+                                                }
+                                            }
+                                            catch (error) {
+                                                console.error("Error sending transaction:", error);
+                                                toast.dismiss(isTransactionStatus);
+                                                toast.error("Transaction failed!");
+                                            }
                                         }
                                     }}
                                     disabled={isJoining}
